@@ -57,10 +57,11 @@ def compute_ratio(followers_count, friends_count):
 async def main_async(input_username: str):
     """
     Retrieves and processes the following network asynchronously.
-    Now includes three hops of following relationships.
+    Enhanced to store additional account attributes for filtering.
     """
     nodes, edges = {}, []
     original_id = f"orig_{input_username}"
+    # The original node: minimal attributes with only available fields
     nodes[original_id] = {
         "screen_name": input_username,
         "name": input_username,
@@ -70,12 +71,10 @@ async def main_async(input_username: str):
         "media_count": None,
         "description": None,
         "ratio": None,
-        "direct": True,
-        "hop": 0  # Add hop level tracking
+        "direct": True
     }
 
     async with aiohttp.ClientSession() as session:
-        # First hop
         first_hop_accounts = await get_following_async(input_username, session)
         for account in first_hop_accounts:
             uid = str(account.get("user_id"))
@@ -91,18 +90,11 @@ async def main_async(input_username: str):
                 "media_count": account.get("media_count", 0),
                 "description": account.get("description", ""),
                 "ratio": ratio,
-                "direct": True,
-                "hop": 1
+                "direct": True
             }
             edges.append((original_id, uid))
-
-        # Second hop
-        second_hop_tasks = [get_following_async(acc.get("screen_name", ""), session) 
-                          for acc in first_hop_accounts]
-        second_hop_results = await asyncio.gather(*second_hop_tasks)
-        
-        # Process second hop results and prepare third hop tasks
-        third_hop_tasks = []
+        tasks = [get_following_async(acc.get("screen_name", ""), session) for acc in first_hop_accounts]
+        second_hop_results = await asyncio.gather(*tasks)
         for idx, second_accounts in enumerate(second_hop_results):
             source_id = str(first_hop_accounts[idx].get("user_id"))
             for account in second_accounts:
@@ -120,41 +112,9 @@ async def main_async(input_username: str):
                         "media_count": account.get("media_count", 0),
                         "description": account.get("description", ""),
                         "ratio": ratio,
-                        "direct": False,
-                        "hop": 2
+                        "direct": False
                     }
                 edges.append((source_id, sid))
-                # Add task for third hop
-                third_hop_tasks.append((sid, get_following_async(account.get("screen_name", ""), session)))
-
-        # Execute third hop tasks in batches to avoid overwhelming the API
-        BATCH_SIZE = 10
-        for i in range(0, len(third_hop_tasks), BATCH_SIZE):
-            batch = third_hop_tasks[i:i + BATCH_SIZE]
-            batch_results = await asyncio.gather(*(task[1] for task in batch))
-            
-            # Process third hop results
-            for (source_id, _), third_accounts in zip(batch, batch_results):
-                for account in third_accounts:
-                    tid = str(account.get("user_id"))
-                    if not tid:
-                        continue
-                    ratio = compute_ratio(account.get("followers_count", 0), account.get("friends_count", 0))
-                    if tid not in nodes:
-                        nodes[tid] = {
-                            "screen_name": account.get("screen_name", ""),
-                            "name": account.get("name", ""),
-                            "followers_count": account.get("followers_count", 0),
-                            "friends_count": account.get("friends_count", 0),
-                            "statuses_count": account.get("statuses_count", 0),
-                            "media_count": account.get("media_count", 0),
-                            "description": account.get("description", ""),
-                            "ratio": ratio,
-                            "direct": False,
-                            "hop": 3
-                        }
-                    edges.append((source_id, tid))
-
     return nodes, edges
 
 def filter_nodes(nodes, filters):
@@ -227,17 +187,8 @@ def build_network(nodes, edges, top_n=10):
             Follower/Following Ratio: {meta['ratio']:.2f}
             Statuses: {meta.get('statuses_count', 0):,}
             Media Count: {meta.get('media_count', 0):,}
-            Hop Level: {meta.get('hop', 0)}
             """
-            # Color nodes based on hop level
-            color = {
-                0: "#FF0000",  # Red for original node
-                1: "#00FF00",  # Green for first hop
-                2: "#0000FF",  # Blue for second hop
-                3: "#FFFF00"   # Yellow for third hop
-            }.get(meta.get('hop', 0), "#FFFFFF")
-            
-            net.add_node(str(node_id), label=meta["screen_name"], title=hover_text, color=color)
+            net.add_node(str(node_id), label=meta["screen_name"], title=hover_text)
     
     for src, tgt in edges:
         if src in top_nodes and tgt in top_nodes:
