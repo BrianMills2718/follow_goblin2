@@ -37,7 +37,6 @@ from typing import List, Dict
 import colorsys
 import random
 from tqdm import tqdm  # For progress tracking
-from dotenv import load_dotenv
 import os
 
 # CONSTANTS
