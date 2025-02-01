@@ -245,190 +245,277 @@ def filter_nodes(nodes, filters):
 # ---------------------------------------------------------------------
 def build_network_3d(nodes, edges, max_nodes=10, size_factors=None, use_pagerank=False):
     """
-    Constructs a 3D ForceGraph visualization.
-    size_factors is a dict containing:
-        - base_size: base size for nodes
-        - importance_factor: how much in-degree/pagerank affects size
-        - label_size_factor: how much to scale the label size
+    Constructs a 3D ForceGraph visualization with permanent labels and hover info.
+    Updated to apply max_nodes selection similar to the build_network_2d function.
     """
+    # Set default size factors if None
     if size_factors is None:
         size_factors = {
             'base_size': 5,
-            'importance_factor': 3,
-            'label_size_factor': 1
+            'importance_factor': 3.0,
+            'label_size_factor': 1.0
         }
 
-    # Compute both in-degrees and PageRank
+    # Determine node importance
+    in_degrees = {node_id: 0 for node_id in nodes.keys()}
+    for src, tgt in edges:
+        if tgt in in_degrees:
+            in_degrees[tgt] += 1
+            
+    pagerank = compute_pagerank(nodes, edges)
+    importance = pagerank if use_pagerank else in_degrees
+
+    # Identify the original node.
+    original_id = next(id for id in nodes.keys() if id.startswith("orig_"))
+    followed_by_original = {tgt for src, tgt in edges if src == original_id}
+
+    # Select top nodes based on the importance score.
+    top_overall = sorted(
+        [(nid, score) for nid, score in importance.items() if not nid.startswith("orig_")],
+        key=lambda x: x[1],
+        reverse=True
+    )[:max_nodes // 2]
+
+    top_independent = sorted(
+        [(nid, score) for nid, score in importance.items()
+         if not nid.startswith("orig_") and nid not in followed_by_original],
+        key=lambda x: x[1],
+        reverse=True
+    )[:max_nodes // 2]
+
+    selected_nodes = {original_id} | {nid for nid, _ in top_overall} | {nid for nid, _ in top_independent}
+
+    # Filter nodes and edges to only include selected nodes.
+    nodes = {node_id: meta for node_id, meta in nodes.items() if node_id in selected_nodes}
+    edges = [(src, tgt) for src, tgt in edges if src in selected_nodes and tgt in selected_nodes]
+
+    nodes_data = []
+    links_data = []
+
+    # Convert edges to proper format.
+    links_data = [{"source": str(src), "target": str(tgt)} for src, tgt in edges]
+
+    # Convert nodes to proper format with additional info.
+    for node_id, meta in nodes.items():
+        try:
+            base_size = float(size_factors.get('base_size', 5))
+            importance_factor = float(size_factors.get('importance_factor', 3.0))
+            
+            # Ensure followers_count is a number
+            followers_count = meta.get("followers_count")
+            if followers_count is None or not isinstance(followers_count, (int, float)):
+                followers_count = 0
+            
+            # Calculate node size with type checking
+            followers_factor = float(followers_count) / 1000.0
+            node_size = base_size + followers_factor * importance_factor
+            
+            # Ensure node_size is positive
+            node_size = max(1.0, node_size)
+            
+            nodes_data.append({
+                "id": str(node_id),
+                "name": str(meta.get("screen_name", "")),
+                "followers": int(followers_count),
+                "following": int(meta.get("friends_count", 0)),
+                "ratio": float(meta.get("ratio", 0.0)),
+                "size": float(node_size)
+            })
+        except (TypeError, ValueError) as e:
+            # If there's any error in the calculations, use default values
+            st.write(f"Warning: Error processing node {node_id}: {str(e)}")
+            nodes_data.append({
+                "id": str(node_id),
+                "name": str(meta.get("screen_name", "")),
+                "followers": 0,
+                "following": 0,
+                "ratio": 0.0,
+                "size": float(size_factors.get('base_size', 5))
+            })
+
+    nodes_json = json.dumps(nodes_data)
+    links_json = json.dumps(links_data)
+
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <script src="https://unpkg.com/three@0.149.0/build/three.min.js"></script>
+        <script src="https://unpkg.com/3d-force-graph@1.70.10/dist/3d-force-graph.min.js"></script>
+        <script src="https://unpkg.com/three-spritetext"></script>
+        <style>
+          #graph {{ width: 100%; height: 750px; }}
+          .node-tooltip {{
+              font-family: Arial;
+              padding: 8px;
+              border-radius: 4px;
+              background-color: rgba(0,0,0,0.8);
+              color: white;
+              white-space: pre-line;
+              font-size: 14px;
+          }}
+        </style>
+      </head>
+      <body>
+        <div id="graph"></div>
+        <script>
+          const data = {{
+            nodes: {nodes_json},
+            links: {links_json}
+          }};
+          
+          console.log("Graph data:", data);
+          
+          const Graph = ForceGraph3D()
+            (document.getElementById('graph'))
+            .graphData(data)
+            .nodeColor(() => '#6ca6cd')
+            .nodeRelSize(6)
+            .nodeVal(node => node.size)  // Use the node.size value for actual node size
+            .nodeThreeObject(node => {{
+                const group = new THREE.Group();
+                
+                // Add the sphere with size based on node.size
+                const sphere = new THREE.Mesh(
+                    new THREE.SphereGeometry(Math.cbrt(node.size)),  // Use cube root for more reasonable scaling
+                    new THREE.MeshLambertMaterial({{
+                        color: '#6ca6cd',
+                        transparent: true,
+                        opacity: 0.75
+                    }})
+                );
+                group.add(sphere);
+                
+                // Add text sprite with size relative to node size
+                const sprite = new SpriteText(node.name);
+                sprite.textHeight = Math.max(4, Math.min(12, 8 * Math.cbrt(node.size / 10))) * 
+                                  {size_factors.get('label_size_factor', 1.0)};
+                sprite.color = 'white';
+                sprite.backgroundColor = 'rgba(0,0,0,0.6)';
+                sprite.padding = 2;
+                sprite.borderRadius = 3;
+                sprite.position.y = Math.cbrt(node.size) + 1;  // Position above sphere
+                group.add(sprite);
+                
+                return group;
+            }})
+            .nodeLabel(node => `
+                <div class="node-tooltip">
+                <b>@${{node.name}}</b>
+                Followers: ${{node.followers.toLocaleString()}}
+                Following: ${{node.following.toLocaleString()}}
+                Ratio: ${{node.ratio.toFixed(2)}}
+                Size: ${{node.size.toFixed(2)}}
+                </div>
+            `)
+            .linkDirectionalParticles(1)
+            .linkDirectionalParticleSpeed(0.006)
+            .backgroundColor("#101020");
+
+          // Set initial camera position
+          Graph.cameraPosition({{ x: 150, y: 150, z: 150 }});
+
+          // Adjust force parameters for better layout
+          Graph.d3Force('charge').strength(-120);
+          
+          // Add node click behavior for camera focus
+          Graph.onNodeClick(node => {{
+              const distance = 40;
+              const distRatio = 1 + distance/Math.hypot(node.x, node.y, node.z);
+              Graph.cameraPosition(
+                  {{ x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }},
+                  node,
+                  2000
+              );
+          }});
+        </script>
+      </body>
+    </html>
+    """
+    return html_code
+
+
+# ---------------------------------------------------------------------
+# End new 3D visualization code
+# ---------------------------------------------------------------------
+
+def build_network_2d(nodes, edges, max_nodes=10, size_factors=None, use_pagerank=False):
+    """
+    Constructs a 2D network visualization using pyvis.
+    Uses the same parameters as build_network_3d for consistency.
+    """
+    # Use same importance calculation as 3D version
     in_degrees = {node_id: 0 for node_id in nodes.keys()}
     for src, tgt in edges:
         if tgt in in_degrees:
             in_degrees[tgt] += 1
     
     pagerank = compute_pagerank(nodes, edges)
-    
-    # Determine importance metric based on selection
     importance = pagerank if use_pagerank else in_degrees
     
-    # Find original node
+    # Find original node and followed nodes
     original_id = next(id for id in nodes.keys() if id.startswith("orig_"))
-    
-    # Find nodes followed by original account
     followed_by_original = {tgt for src, tgt in edges if src == original_id}
     
-    # Get top N overall nodes (excluding original)
+    # Select nodes same way as 3D version
     top_overall = sorted(
         [(nid, score) for nid, score in importance.items() 
          if not nid.startswith("orig_")],
         key=lambda x: x[1],
         reverse=True
-    )[:max_nodes//2]  # Use half the max nodes for each category
+    )[:max_nodes//2]
     
-    # Get top N independent nodes (not followed by original)
     top_independent = sorted(
         [(nid, score) for nid, score in importance.items() 
          if not nid.startswith("orig_") and nid not in followed_by_original],
         key=lambda x: x[1],
         reverse=True
-    )[:max_nodes//2]  # Use half the max nodes for each category
+    )[:max_nodes//2]
     
-    # Combine selected nodes
     selected_nodes = {original_id} | {nid for nid, _ in top_overall} | {nid for nid, _ in top_independent}
 
-    # Normalize importance scores for sizing
+    # Create pyvis network
+    net = Network(height="750px", width="100%", bgcolor="#222222", font_color="white")
+    
+    # Normalize importance scores
     max_importance = max(importance.values())
-    normalized_importance = {
-        nid: score/max_importance 
-        for nid, score in importance.items()
-    }
+    normalized_importance = {nid: score/max_importance for nid, score in importance.items()}
+    
+    # Add nodes
+    for node_id in selected_nodes:
+        size = (size_factors['base_size'] +
+                normalized_importance[node_id] * size_factors['importance_factor'] * 20)
+        
+        # Safely format numeric values by checking for None
+        followers = nodes[node_id].get('followers_count')
+        followers_str = f"{followers:,}" if isinstance(followers, int) else "0"
+        friends = nodes[node_id].get('friends_count')
+        friends_str = f"{friends:,}" if isinstance(friends, int) else "0"
+        ratio = nodes[node_id].get('ratio')
+        ratio_str = f"{ratio:.2f}" if isinstance(ratio, (int, float)) else "0.00"
+        description = nodes[node_id].get('description') or ""
+        title = (f"Followers: {followers_str}\n"
+                 f"Following: {friends_str}\n"
+                 f"Ratio: {ratio_str}\n"
+                 f"Description: {description}")
 
-    # Build nodes array for 3D visualization
-    nodes_data = []
-    for node_id, meta in nodes.items():
-        if node_id in selected_nodes:
-            # Calculate node size using the normalized importance
-            size = (size_factors['base_size'] + 
-                   normalized_importance[node_id] * size_factors['importance_factor'] * 20)
-            nodes_data.append({
-                "id": node_id,
-                "name": meta["screen_name"],
-                "size": size,
-                "followers": meta.get("followers_count", 0),
-                "following": meta.get("friends_count", 0),
-                "ratio": meta.get("ratio", 0),
-                "importance": importance[node_id],
-                "isFollowed": node_id in followed_by_original,
-                "isOriginal": node_id.startswith("orig_")
-            })
+        color = "#ff0000" if node_id == original_id else "#6ca6cd"
 
-    links_data = [
-        {"source": src, "target": tgt} 
-        for src, tgt in edges 
-        if src in selected_nodes and tgt in selected_nodes
-    ]
-
-    nodes_json = json.dumps(nodes_data)
-    links_json = json.dumps(links_data)
-    label_scale = size_factors['label_size_factor']
-
-    html_code = f"""
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <title>3D Force Graph</title>
-    <script src="https://unpkg.com/three@0.149.0/build/three.min.js"></script>
-    <script src="https://unpkg.com/3d-force-graph@1.70.10/dist/3d-force-graph.min.js"></script>
-    <script src="https://unpkg.com/three-spritetext"></script>
-    <style>
-      body {{ margin: 0; }}
-      #graph {{ width: 100%; height: 750px; }}
-      .node-label {{
-          font-family: Arial;
-          padding: 4px 8px;
-          border-radius: 4px;
-          background-color: rgba(0,0,0,0.6);
-          color: white;
-          white-space: nowrap;
-      }}
-    </style>
-  </head>
-  <body>
-    <div id="graph"></div>
-    <script>
-      const graphData = {{
-        nodes: {nodes_json},
-        links: {links_json}
-      }};
-
-      const Graph = ForceGraph3D()
-        (document.getElementById('graph'))
-        .graphData(graphData)
-        .nodeAutoColorBy('id')
-        .nodeThreeObject(node => {{
-            const group = new THREE.Group();
-            
-            // Create node sphere
-            const sphere = new THREE.Mesh(
-                new THREE.SphereGeometry(node.size / 2),
-                new THREE.MeshLambertMaterial({{
-                    color: node.color || 0x6ca6cd,
-                    transparent: true,
-                    opacity: 0.75
-                }})
-            );
-            group.add(sphere);
-
-            // Create label sprite
-            const sprite = new SpriteText(node.name);
-            sprite.textHeight = node.size * {label_scale};
-            sprite.color = 'white';
-            sprite.backgroundColor = 'rgba(0,0,0,0.6)';
-            sprite.padding = 2;
-            sprite.borderRadius = 3;
-            sprite.position.y = node.size / 2 + 2;
-            group.add(sprite);
-            
-            return group;
-        }})
-        .nodeVal('size')
-        .nodeLabel(node => 
-            `<div class="node-label">
-                ${{node.name}}<br>
-                Followers: ${{node.followers.toLocaleString()}}<br>
-                Following: ${{node.following.toLocaleString()}}<br>
-                Ratio: ${{node.ratio.toFixed(2)}}
-            </div>`
+        net.add_node(
+            node_id,
+            label=nodes[node_id]["screen_name"],
+            title=title,
+            size=size,
+            color=color
         )
-        .linkDirectionalParticles(2)
-        .linkDirectionalParticleSpeed(0.006)
-        .backgroundColor("#101020");
-
-      // Set initial camera position
-      Graph.cameraPosition({{ x: 100, y: 100, z: 100 }});
-      
-      // Adjust force parameters
-      Graph.d3Force('charge').strength(-120);
-      Graph.d3Force('link').distance(50);
-
-      // Add node click behavior for camera focus
-      Graph.onNodeClick(node => {{
-          const distance = 80;
-          const distRatio = 1 + distance/Math.hypot(node.x, node.y, node.z);
-          Graph.cameraPosition(
-              {{ x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }},
-              node,
-              3000
-          );
-      }});
-    </script>
-  </body>
-</html>
-    """
-    return html_code
-
-# ---------------------------------------------------------------------
-# End new 3D visualization code
-# ---------------------------------------------------------------------
+    
+    # Add edges between selected nodes
+    for src, tgt in edges:
+        if src in selected_nodes and tgt in selected_nodes:
+            net.add_edge(src, tgt)
+    
+    return net
 
 def create_account_table(accounts_data, start_idx=0, page_size=10):
     """
@@ -438,7 +525,7 @@ def create_account_table(accounts_data, start_idx=0, page_size=10):
     if not accounts_data:
         return st.write("No accounts to display")
     
-    # Create the table data
+    # Update table columns
     table_data = {
         "Rank": [],
         "Username": [],
@@ -446,8 +533,7 @@ def create_account_table(accounts_data, start_idx=0, page_size=10):
         "Followers": [],
         "Following": [],
         "F/F Ratio": [],
-        "Verified": [],
-        "Location": []
+        "Description": []  # Replace verified/location with description
     }
     
     end_idx = min(start_idx + page_size, len(accounts_data))
@@ -455,11 +541,10 @@ def create_account_table(accounts_data, start_idx=0, page_size=10):
         table_data["Rank"].append(idx)
         table_data["Username"].append(node["screen_name"])
         table_data["Score"].append(f"{score:.4f}")
-        table_data["Followers"].append(f"{node['followers_count']:,}")
-        table_data["Following"].append(f"{node['friends_count']:,}")
+        table_data["Followers"].append(f"{node.get('followers_count', 0):,}")
+        table_data["Following"].append(f"{node.get('friends_count', 0):,}")
         table_data["F/F Ratio"].append(f"{node.get('ratio', 0):.2f}")
-        table_data["Verified"].append("✓" if node.get("verified", False) else "")
-        table_data["Location"].append(node.get("location", ""))
+        table_data["Description"].append(node.get("description", ""))
     
     st.table(table_data)
     
@@ -470,219 +555,202 @@ def run_async_main(input_username: str):
     return asyncio.run(main_async(input_username))
 
 def main():
-    st.title("X Account Following Network Visualization (Asynchronous – 3D)")
-    st.markdown("Enter an X (formerly Twitter) username to retrieve its following network. The resulting network is displayed in 3D.")
+   st.title("X Account Following Network Visualization")
+   st.markdown("Enter an X (formerly Twitter) username to retrieve its following network.")
 
-    input_username = st.text_input("X Username (without @):", value="elonmusk")
-    
-    # Sidebar: Display Options and Filter Criteria.
-    st.sidebar.header("Display Options")
-    
-    # Node and Label Size Controls
-    st.sidebar.subheader("Size Controls")
-    use_pagerank = st.sidebar.checkbox("Use PageRank for Importance", value=False)
-    base_size = st.sidebar.slider("Base Node Size", 
-                                min_value=1, 
-                                max_value=20, 
-                                value=5)
-    
-    importance_factor = st.sidebar.slider(
-        "PageRank Factor" if use_pagerank else "In-Degree Factor", 
-        min_value=0.1, 
-        max_value=10.0, 
-        value=3.0
-    )
-    
-    label_size_factor = st.sidebar.slider("Label Size Factor", 
-                                        min_value=0.1, 
-                                        max_value=5.0, 
-                                        value=1.0)
-    
-    max_nodes_display = st.sidebar.slider("Max Nodes to Display", 
-                                        min_value=5, 
-                                        max_value=1000, 
-                                        value=50,
-                                        step=5)
-    
-    st.sidebar.header("Filter Criteria")
-    
-    # Replace individual min/max inputs with range sliders
-    st.sidebar.subheader("Numeric Ranges")
-    statuses_range = st.sidebar.slider("Statuses Count Range", 
-                                     min_value=0, max_value=1000000, 
-                                     value=(0, 1000000))
-    
-    followers_range = st.sidebar.slider("Followers Count Range", 
-                                      min_value=0, max_value=10000000, 
-                                      value=(0, 10000000))
-    
-    friends_range = st.sidebar.slider("Friends Count Range", 
-                                    min_value=0, max_value=10000000, 
-                                    value=(0, 10000000))
-    
-    media_range = st.sidebar.slider("Media Count Range", 
-                                  min_value=0, max_value=10000, 
-                                  value=(0, 10000))
-    
-    st.sidebar.subheader("Date Range")
-    start_date = st.sidebar.date_input("Start Date", value=datetime.date(2020, 1, 1))
-    end_date = st.sidebar.date_input("End Date", value=datetime.date.today())
-    created_range = (start_date, end_date)
-    
-    st.sidebar.subheader("Location Filters")
-    require_location = st.sidebar.checkbox("Only accounts with non-empty location", value=False)
-    
-    if 'network_data' in st.session_state and st.session_state.network_data is not None:
-        nodes, _ = st.session_state.network_data
-        all_locations = set()
-        location_map = {}
-        for node in nodes.values():
-            location = node.get("location")
-            if location is not None and isinstance(location, str):
-                loc = location.strip()
-                if loc:
-                    normalized = loc.lower()
-                    all_locations.add(normalized)
-                    location_map[normalized] = loc
+   input_username = st.text_input("X Username (without @):", value="elonmusk")
+   
+   # Add visualization toggle
+   use_3d = st.checkbox("Use 3D Visualization", value=True)
+   
+   # Sidebar: Display Options and Filter Criteria
+   st.sidebar.header("Display Options")
+   
+   # Node and Label Size Controls
+   st.sidebar.subheader("Size Controls")
+   use_pagerank = st.sidebar.checkbox("Use PageRank for Importance", value=False)
+   base_size = st.sidebar.slider("Base Node Size", 
+                               min_value=1, 
+                               max_value=20, 
+                               value=5)
+   
+   importance_factor = st.sidebar.slider(
+       "PageRank Factor" if use_pagerank else "In-Degree Factor", 
+       min_value=0.1, 
+       max_value=10.0, 
+       value=3.0
+   )
+   
+   if use_3d:  # Label size only applies to 3D visualization
+       label_size_factor = st.sidebar.slider("Label Size Factor", 
+                                           min_value=0.1, 
+                                           max_value=5.0, 
+                                           value=1.0)
+   
+   max_nodes_display = st.sidebar.slider("Max Nodes to Display", 
+                                       min_value=5, 
+                                       max_value=1000, 
+                                       value=50,
+                                       step=5)
+   
+   st.sidebar.header("Filter Criteria")
+   
+   # Keep only the numeric filters
+   st.sidebar.subheader("Numeric Ranges")
+   statuses_range = st.sidebar.slider("Statuses Count Range", 
+                                    min_value=0, max_value=1000000, 
+                                    value=(0, 1000000))
+   
+   followers_range = st.sidebar.slider("Followers Count Range", 
+                                     min_value=0, max_value=10000000, 
+                                     value=(0, 10000000))
+   
+   friends_range = st.sidebar.slider("Friends Count Range", 
+                                   min_value=0, max_value=10000000, 
+                                   value=(0, 10000000))
+   
+   media_range = st.sidebar.slider("Media Count Range", 
+                                 min_value=0, max_value=10000, 
+                                 value=(0, 10000))
+   
+   filters = {
+       "statuses_range": statuses_range,
+       "followers_range": followers_range,
+       "friends_range": friends_range,
+       "media_range": media_range,
+       "created_range": (datetime.date(2000, 1, 1), datetime.date(2100, 1, 1)),
+       "require_location": False,
+       "selected_locations": [],
+       "require_blue_verified": False,
+       "verified_option": "Any",
+       "require_website": False,
+       "business_account_option": "Any"
+   }
+   
+   if 'network_data' not in st.session_state:
+       st.session_state.network_data = None
+   
+   if st.button("Generate Network"):
+       nodes, edges = run_async_main(input_username)
+       # Add debug information
+       st.write(f"DEBUG: Retrieved {len(nodes)} nodes and {len(edges)} edges from API.")
+       # Check for None values in followers_count
+       none_followers = [node_id for node_id, data in nodes.items() 
+                        if data.get('followers_count') is None]
+       if none_followers:
+           st.write(f"WARNING: Found {len(none_followers)} nodes with None followers_count")
+       
+       st.session_state.network_data = (nodes, edges)
+   
+   if st.session_state.network_data is not None:
+       nodes, edges = st.session_state.network_data
+       filtered_nodes = filter_nodes(nodes, filters)
+       filtered_edges = [(src, tgt) for src, tgt in edges if src in filtered_nodes and tgt in filtered_nodes]
+       
+       # Add debug information for filtered data
+       st.write(f"DEBUG: After filtering: {len(filtered_nodes)} nodes and {len(filtered_edges)} edges")
+       
+       size_factors = {
+           'base_size': float(base_size),
+           'importance_factor': float(importance_factor),
+           'label_size_factor': float(label_size_factor if use_3d else 1.0)
+       }
+       
+       if use_3d:
+           html_code = build_network_3d(
+               filtered_nodes, 
+               filtered_edges,
+               max_nodes=max_nodes_display,
+               size_factors=size_factors,
+               use_pagerank=use_pagerank
+           )
+           st.write("Debug: About to render 3D graph")
+           components.html(html_code, height=750, width=800)
+           st.write("Debug: Finished rendering")
+       else:
+           net = build_network_2d(
+               filtered_nodes, 
+               filtered_edges,
+               max_nodes=max_nodes_display,
+               size_factors=size_factors,
+               use_pagerank=use_pagerank
+           )
+           net.save_graph("network.html")
+           with open("network.html", 'r', encoding='utf-8') as f:
+               components.html(f.read(), height=750, width=800)
 
-        location_search = st.sidebar.text_input("Search locations", "")
-        filtered_locations = []
-        if location_search:
-            search_term = location_search.lower()
-            filtered_locations = [location_map[loc] for loc in all_locations if search_term in loc]
-        else:
-            filtered_locations = [location_map[loc] for loc in all_locations]
+       # Update the display of top accounts to use max_nodes_display
+       importance = compute_pagerank(filtered_nodes, filtered_edges) if use_pagerank else {
+           node_id: sum(1 for _, tgt in filtered_edges if tgt == node_id)
+           for node_id in filtered_nodes
+       }
+       
+       original_id = next(id for id in filtered_nodes.keys() if id.startswith("orig_"))
+       followed_by_original = {tgt for src, tgt in filtered_edges if src == original_id}
+       
+       # Initialize session state for pagination if not exists
+       if 'overall_page' not in st.session_state:
+           st.session_state.overall_page = 0
+       if 'independent_page' not in st.session_state:
+           st.session_state.independent_page = 0
+       
+       # Prepare account data with all relevant information
+       overall_accounts = [
+           (nid, score, filtered_nodes[nid]) 
+           for nid, score in sorted(
+               [(nid, score) for nid, score in importance.items() if not nid.startswith("orig_")],
+               key=lambda x: x[1],
+               reverse=True
+           )
+       ]
+       
+       independent_accounts = [
+           (nid, score, filtered_nodes[nid]) 
+           for nid, score in sorted(
+               [(nid, score) for nid, score in importance.items() 
+                if not nid.startswith("orig_") and nid not in followed_by_original],
+               key=lambda x: x[1],
+               reverse=True
+           )
+       ]
+       
+       # Display overall top accounts
+       st.subheader(f"Top Accounts by {'PageRank' if use_pagerank else 'In-Degree'}")
+       col1, col2 = st.columns([4, 1])
+       with col1:
+           has_more_overall = create_account_table(
+               overall_accounts, 
+               start_idx=st.session_state.overall_page * 10
+           )
+       with col2:
+           if has_more_overall:
+               if st.button("Next 10 ▶", key="next_overall"):
+                   st.session_state.overall_page += 1
+           if st.session_state.overall_page > 0:
+               if st.button("◀ Previous", key="prev_overall"):
+                   st.session_state.overall_page -= 1
+       
+       # Display independent top accounts
+       st.subheader("Top Independent Accounts (Not Followed by Original)")
+       col1, col2 = st.columns([4, 1])
+       with col1:
+           has_more_independent = create_account_table(
+               independent_accounts, 
+               start_idx=st.session_state.independent_page * 10
+           )
+       with col2:
+           if has_more_independent:
+               if st.button("Next 10 ▶", key="next_independent"):
+                   st.session_state.independent_page += 1
+           if st.session_state.independent_page > 0:
+               if st.button("◀ Previous", key="prev_independent"):
+                   st.session_state.independent_page -= 1
 
-        selected_locations = st.sidebar.multiselect(
-            "Select locations",
-            options=sorted(filtered_locations),
-            help="Select one or more locations to filter nodes. Type above to search."
-        )
-    else:
-        selected_locations = []
-    
-    st.sidebar.subheader("Other Filters")
-    require_blue_verified = st.sidebar.checkbox("Only blue verified accounts", value=False)
-    verified_option = st.sidebar.selectbox("Verified Status", options=["Any", "Only Verified", "Only Not Verified"])
-    require_website = st.sidebar.checkbox("Only accounts with website", value=False)
-    business_account_option = st.sidebar.selectbox("Business Account", options=["Any", "Only Business Accounts", "Only Non-Business Accounts"])
-    
-    filters = {
-        "statuses_range": statuses_range,
-        "followers_range": followers_range,
-        "friends_range": friends_range,
-        "media_range": media_range,
-        "created_range": created_range,
-        "require_location": require_location,
-        "selected_locations": selected_locations,
-        "require_blue_verified": require_blue_verified,
-        "verified_option": verified_option,
-        "require_website": require_website,
-        "business_account_option": business_account_option
-    }
-    
-    if 'network_data' not in st.session_state:
-        st.session_state.network_data = None
-    
-    if st.button("Generate Network"):
-        nodes, edges = run_async_main(input_username)
-        st.session_state.network_data = (nodes, edges)
-        st.write("DEBUG: Retrieved nodes and edges from API.")
-    
-    if st.session_state.network_data is not None:
-        nodes, edges = st.session_state.network_data
-        
-        filtered_nodes = filter_nodes(nodes, filters)
-        st.write(f"DEBUG: {len(filtered_nodes)} nodes remain after applying filters.")
-        filtered_edges = [(src, tgt) for src, tgt in edges if src in filtered_nodes and tgt in filtered_nodes]
-        
-        size_factors = {
-            'base_size': base_size,
-            'importance_factor': importance_factor,
-            'label_size_factor': label_size_factor
-        }
-        
-        html_code = build_network_3d(
-            filtered_nodes, 
-            filtered_edges,
-            max_nodes=max_nodes_display,  # Pass max_nodes_display here
-            size_factors=size_factors,
-            use_pagerank=use_pagerank
-        )
-        components.html(html_code, height=750, width=800)
-        
-        # Update the display of top accounts to use max_nodes_display
-        importance = compute_pagerank(filtered_nodes, filtered_edges) if use_pagerank else {
-            node_id: sum(1 for _, tgt in filtered_edges if tgt == node_id)
-            for node_id in filtered_nodes
-        }
-        
-        original_id = next(id for id in filtered_nodes.keys() if id.startswith("orig_"))
-        followed_by_original = {tgt for src, tgt in filtered_edges if src == original_id}
-        
-        # Initialize session state for pagination if not exists
-        if 'overall_page' not in st.session_state:
-            st.session_state.overall_page = 0
-        if 'independent_page' not in st.session_state:
-            st.session_state.independent_page = 0
-        
-        # Prepare account data with all relevant information
-        overall_accounts = [
-            (nid, score, filtered_nodes[nid]) 
-            for nid, score in sorted(
-                [(nid, score) for nid, score in importance.items() if not nid.startswith("orig_")],
-                key=lambda x: x[1],
-                reverse=True
-            )
-        ]
-        
-        independent_accounts = [
-            (nid, score, filtered_nodes[nid]) 
-            for nid, score in sorted(
-                [(nid, score) for nid, score in importance.items() 
-                 if not nid.startswith("orig_") and nid not in followed_by_original],
-                key=lambda x: x[1],
-                reverse=True
-            )
-        ]
-        
-        # Display overall top accounts
-        st.subheader(f"Top Accounts by {'PageRank' if use_pagerank else 'In-Degree'}")
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            has_more_overall = create_account_table(
-                overall_accounts, 
-                start_idx=st.session_state.overall_page * 10
-            )
-        with col2:
-            if has_more_overall:
-                if st.button("Next 10 ▶", key="next_overall"):
-                    st.session_state.overall_page += 1
-            if st.session_state.overall_page > 0:
-                if st.button("◀ Previous", key="prev_overall"):
-                    st.session_state.overall_page -= 1
-        
-        # Display independent top accounts
-        st.subheader("Top Independent Accounts (Not Followed by Original)")
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            has_more_independent = create_account_table(
-                independent_accounts, 
-                start_idx=st.session_state.independent_page * 10
-            )
-        with col2:
-            if has_more_independent:
-                if st.button("Next 10 ▶", key="next_independent"):
-                    st.session_state.independent_page += 1
-            if st.session_state.independent_page > 0:
-                if st.button("◀ Previous", key="prev_independent"):
-                    st.session_state.independent_page -= 1
-
-        # Add reset button for pagination
-        if st.button("Reset Tables"):
-            st.session_state.overall_page = 0
-            st.session_state.independent_page = 0
-            st.experimental_rerun()
+       # Add reset button for pagination
+       if st.button("Reset Tables"):
+           st.session_state.overall_page = 0
+           st.session_state.independent_page = 0
+           st.experimental_rerun()
 
 if __name__ == "__main__":
     main()
