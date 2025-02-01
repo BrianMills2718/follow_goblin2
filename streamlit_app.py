@@ -40,11 +40,8 @@ from tqdm import tqdm  # For progress tracking
 from dotenv import load_dotenv
 import os
 
-# Add at the start of the file
-load_dotenv()
-
-# CONSTANTS – Adjust your RapidAPI credentials as necessary.
-RAPIDAPI_KEY = os.getenv('RAPIDAPI_KEY')
+# CONSTANTS
+RAPIDAPI_KEY = st.secrets["RAPIDAPI_KEY"]
 RAPIDAPI_HOST = "twitter-api45.p.rapidapi.com"
 
 # Add these constants after the existing RAPIDAPI constants
@@ -262,7 +259,7 @@ def filter_nodes(nodes, filters):
 # ---------------------------------------------------------------------
 def get_openai_client():
     """Initialize OpenAI client."""
-    return OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 async def get_community_labels(accounts: List[Dict], num_communities: int) -> List[str]:
     """Get community labels from GPT-4o-mini."""

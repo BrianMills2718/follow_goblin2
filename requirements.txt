@@ -4,5 +4,4 @@ numpy
 scipy
 openai
 pyvis
-python-dotenv
 tqdm 
