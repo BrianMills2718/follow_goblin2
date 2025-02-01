@@ -49,10 +49,7 @@ async def get_following_async(screenname: str, session: aiohttp.ClientSession):
 
 def compute_ratio(followers_count, friends_count):
     """Compute follower/following ratio; return 0 if denominator is zero."""
-    try:
-        return followers_count / friends_count if friends_count else 0
-    except:
-        return 0
+    return followers_count / friends_count if friends_count else 0
 
 async def main_async(input_username: str):
     """
@@ -61,7 +58,7 @@ async def main_async(input_username: str):
     """
     nodes, edges = {}, []
     original_id = f"orig_{input_username}"
-    # The original node: minimal attributes with only available fields
+    # The original node: minimal attributes.
     nodes[original_id] = {
         "screen_name": input_username,
         "name": input_username,
@@ -69,7 +66,12 @@ async def main_async(input_username: str):
         "friends_count": None,
         "statuses_count": None,
         "media_count": None,
-        "description": None,
+        "created_at": None,
+        "location": None,
+        "blue_verified": None,
+        "verified": None,
+        "website": None,
+        "business_account": None,
         "ratio": None,
         "direct": True
     }
@@ -88,7 +90,12 @@ async def main_async(input_username: str):
                 "friends_count": account.get("friends_count", 0),
                 "statuses_count": account.get("statuses_count", 0),
                 "media_count": account.get("media_count", 0),
-                "description": account.get("description", ""),
+                "created_at": account.get("created_at", ""),
+                "location": account.get("location", ""),
+                "blue_verified": account.get("blue_verified", False),
+                "verified": account.get("verified", False),
+                "website": account.get("website", ""),
+                "business_account": account.get("business_account", False),
                 "ratio": ratio,
                 "direct": True
             }
@@ -110,7 +117,12 @@ async def main_async(input_username: str):
                         "friends_count": account.get("friends_count", 0),
                         "statuses_count": account.get("statuses_count", 0),
                         "media_count": account.get("media_count", 0),
-                        "description": account.get("description", ""),
+                        "created_at": account.get("created_at", ""),
+                        "location": account.get("location", ""),
+                        "blue_verified": account.get("blue_verified", False),
+                        "verified": account.get("verified", False),
+                        "website": account.get("website", ""),
+                        "business_account": account.get("business_account", False),
                         "ratio": ratio,
                         "direct": False
                     }
@@ -123,7 +135,7 @@ def filter_nodes(nodes, filters):
     """
     filtered = {}
     for node_id, node in nodes.items():
-        # Always include the original node
+        # Always include the original node.
         if node_id.startswith("orig_"):
             filtered[node_id] = node
             continue
@@ -143,8 +155,45 @@ def filter_nodes(nodes, filters):
             continue
         if not is_in_range(node.get("media_count"), filters["media_range"][0], filters["media_range"][1]):
             continue
-        if not is_in_range(node.get("ratio"), filters["ratio_range"][0], filters["ratio_range"][1]):
-            continue
+
+        # Location filters
+        location = node.get("location")
+        if filters["selected_locations"]:
+            if location is not None and isinstance(location, str) and location.strip():  # Check if location is a string and not empty
+                location = location.strip().lower()
+                if not any(loc.lower() in location for loc in filters["selected_locations"]):
+                    continue
+            else:
+                continue  # If location is None or empty, skip this node
+        elif filters["require_location"]:
+            if not location or not isinstance(location, str) or not location.strip():  # Check if location is None or empty
+                continue
+
+        # Blue verified filter.
+        if filters["require_blue_verified"]:
+            if not node.get("blue_verified", False):
+                continue
+
+        # Verified filter.
+        if filters["verified_option"] == "Only Verified":
+            if not node.get("verified", False):
+                continue
+        elif filters["verified_option"] == "Only Not Verified":
+            if node.get("verified", False):
+                continue
+
+        # Website filter.
+        if filters["require_website"]:
+            if not node.get("website", "").strip():
+                continue
+
+        # Business account filter.
+        if filters["business_account_option"] == "Only Business Accounts":
+            if not node.get("business_account", False):
+                continue
+        elif filters["business_account_option"] == "Only Non-Business Accounts":
+            if node.get("business_account", False):
+                continue
         
         filtered[node_id] = node
     return filtered
@@ -177,17 +226,8 @@ def build_network(nodes, edges, top_n=10):
     net = Network(height="750px", width="100%", directed=True, bgcolor="#222222", font_color="white")
     for node_id, meta in nodes.items():
         if node_id in top_nodes:
-            hover_text = f"""
-            Name: {meta['name']}
-            Screen Name: {meta['screen_name']}
-            User ID: {node_id}
-            Description: {meta['description']}
-            Followers: {meta.get('followers_count', 0):,}
-            Following: {meta.get('friends_count', 0):,}
-            Follower/Following Ratio: {meta['ratio']:.2f}
-            Statuses: {meta.get('statuses_count', 0):,}
-            Media Count: {meta.get('media_count', 0):,}
-            """
+            hover_text = (f"Name: {meta['name']}<br>Follower/Friend Ratio: {meta['ratio']:.2f}"
+                         if meta["ratio"] is not None else f"Name: {meta['name']}")
             net.add_node(str(node_id), label=meta["screen_name"], title=hover_text)
     
     for src, tgt in edges:
@@ -206,13 +246,13 @@ def main():
 
     input_username = st.text_input("X Username (without @):", value="elonmusk")
     
-    # Sidebar: Display Options and Filter Criteria
+    # Sidebar: Display Options and Filter Criteria.
     st.sidebar.header("Display Options")
     max_nodes_display = st.sidebar.slider("Max Nodes to Display", min_value=5, max_value=100, value=10, step=1)
     
     st.sidebar.header("Filter Criteria")
     
-    # Range sliders for available numeric fields
+    # Replace individual min/max inputs with range sliders
     st.sidebar.subheader("Numeric Ranges")
     statuses_range = st.sidebar.slider("Statuses Count Range", 
                                      min_value=0, max_value=1000000, 
@@ -230,16 +270,75 @@ def main():
                                   min_value=0, max_value=10000, 
                                   value=(0, 10000))
     
-    ratio_range = st.sidebar.slider("Follower/Following Ratio Range",
-                                  min_value=0.0, max_value=1000.0,
-                                  value=(0.0, 1000.0))
+    st.sidebar.subheader("Date Range")
+    # Create a double-sided slider for date selection
+    start_date = st.sidebar.date_input("Start Date", value=datetime.date(2020, 1, 1))
+    end_date = st.sidebar.date_input("End Date", value=datetime.date.today())
+    
+    # Convert to datetime objects for filtering
+    created_range = (start_date, end_date)
+    
+    st.sidebar.subheader("Location Filters")
+    require_location = st.sidebar.checkbox("Only accounts with non-empty location", value=False)
+    
+    # Add location selection with search
+    if 'network_data' in st.session_state and st.session_state.network_data is not None:
+        nodes, _ = st.session_state.network_data
+        # Get unique locations from nodes, safely handling None values
+        all_locations = set()
+        location_map = {}  # Map to store normalized locations
+        for node in nodes.values():
+            location = node.get("location")
+            if location is not None and isinstance(location, str):
+                loc = location.strip()
+                if loc:
+                    # Store both original and lowercase version
+                    normalized = loc.lower()
+                    all_locations.add(normalized)
+                    location_map[normalized] = loc
+
+        # Create a search box for locations
+        location_search = st.sidebar.text_input("Search locations", "")
+        
+        # Filter locations based on search
+        filtered_locations = []
+        if location_search:
+            search_term = location_search.lower()
+            filtered_locations = [
+                location_map[loc] for loc in all_locations 
+                if search_term in loc
+            ]
+        else:
+            filtered_locations = [location_map[loc] for loc in all_locations]
+
+        selected_locations = st.sidebar.multiselect(
+            "Select locations",
+            options=sorted(filtered_locations),
+            help="Select one or more locations to filter nodes. Type above to search."
+        )
+    else:
+        selected_locations = []
+    
+    st.sidebar.subheader("Other Filters")
+    require_blue_verified = st.sidebar.checkbox("Only blue verified accounts", value=False)
+    verified_option = st.sidebar.selectbox("Verified Status", 
+                                         options=["Any", "Only Verified", "Only Not Verified"])
+    require_website = st.sidebar.checkbox("Only accounts with website", value=False)
+    business_account_option = st.sidebar.selectbox("Business Account", 
+                                                 options=["Any", "Only Business Accounts", "Only Non-Business Accounts"])
     
     filters = {
         "statuses_range": statuses_range,
         "followers_range": followers_range,
         "friends_range": friends_range,
         "media_range": media_range,
-        "ratio_range": ratio_range
+        "created_range": created_range,
+        "require_location": require_location,
+        "selected_locations": selected_locations,
+        "require_blue_verified": require_blue_verified,
+        "verified_option": verified_option,
+        "require_website": require_website,
+        "business_account_option": business_account_option
     }
     
     # Use session state to store the network data
@@ -269,38 +368,13 @@ def main():
         with open("network.html", 'r', encoding="utf-8") as html_file:
             components.html(html_file.read(), height=750, width=800)
         
-        # Display top accounts in tables
         st.subheader("Top Accounts by In-Degree (Being Followed)")
-        top_accounts_data = []
         for uid, degree in top_accounts:
-            account = filtered_nodes[uid]
-            top_accounts_data.append({
-                "Screen Name": account['screen_name'],
-                "Name": account['name'],
-                "In-Degree": degree,
-                "Followers": f"{account.get('followers_count', 0):,}",
-                "Following": f"{account.get('friends_count', 0):,}",
-                "Ratio": f"{account.get('ratio', 0):.2f}",
-                "Statuses": f"{account.get('statuses_count', 0):,}",
-                "Media": f"{account.get('media_count', 0):,}"
-            })
-        st.table(top_accounts_data)
+            st.write(f"**{filtered_nodes[uid]['screen_name']}** — In-Degree: {degree}")
             
         st.subheader("Top Independent Accounts by In-Degree (Not Followed by Original Account)")
-        independent_accounts_data = []
         for uid, degree in top_independent:
-            account = filtered_nodes[uid]
-            independent_accounts_data.append({
-                "Screen Name": account['screen_name'],
-                "Name": account['name'],
-                "In-Degree": degree,
-                "Followers": f"{account.get('followers_count', 0):,}",
-                "Following": f"{account.get('friends_count', 0):,}",
-                "Ratio": f"{account.get('ratio', 0):.2f}",
-                "Statuses": f"{account.get('statuses_count', 0):,}",
-                "Media": f"{account.get('media_count', 0):,}"
-            })
-        st.table(independent_accounts_data)
+            st.write(f"**{filtered_nodes[uid]['screen_name']}** — In-Degree: {degree}")
 
 if __name__ == "__main__":
     main()
